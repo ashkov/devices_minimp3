@@ -149,18 +149,49 @@ play_status_t play_file(const char* path) {
     size_t bw;
     for(int i=0; i<8; i++) i2s_channel_write(tx_handle, pcm_buf, sizeof(pcm_buf), &bw, portMAX_DELAY);
 
-    ESP_LOGI(TAG, "Now Playing: %s", path);
+    ESP_LOGI(TAG, "File: %s", path);
+
     size_t n_read = fread(input_buf, 1, sizeof(input_buf), f);
     uint8_t* read_ptr = input_buf;
+
+    uint32_t current_sample_rate = 0;
 
     while (n_read > 0) {
         if (skip_requested) { fclose(f); i2s_channel_disable(tx_handle); return PLAY_NEXT; }
         if (prev_requested) { fclose(f); i2s_channel_disable(tx_handle); return PLAY_PREV; }
 
         int samples = drmp3dec_decode_frame(&mp3d, read_ptr, n_read, pcm_buf, &info);
+
         if (samples > 0) {
-            i2s_channel_write(tx_handle, pcm_buf, samples * info.channels * 2, &bw, portMAX_DELAY);
+            // Если частота в файле изменилась или это начало файла
+            if (info.sample_rate != current_sample_rate) {
+                i2s_channel_disable(tx_handle);
+                current_sample_rate = info.sample_rate;
+
+                ESP_LOGI(TAG, "Changing I2S rate to: %lu, Channels: %d", info.sample_rate, info.channels);
+                
+                // В v5.x перенастройка делается через i2s_channel_reconfig_std_clock
+                i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(current_sample_rate);
+                i2s_channel_reconfig_std_clock(tx_handle, &clk_cfg);
+                i2s_channel_enable(tx_handle);
+            }
+
+            size_t bw;
+            if (info.channels == 1) {
+                // Если файл моно, расширяем его до стерео "на лету" прямо в том же буфере
+                // Идем с конца буфера к началу, чтобы не затереть данные
+                for (int i = samples - 1; i >= 0; i--) {
+                    pcm_buf[i * 2]     = pcm_buf[i]; // Левый канал
+                    pcm_buf[i * 2 + 1] = pcm_buf[i]; // Правый канал
+                }
+                // Теперь данных в 2 раза больше, и они выглядят как стерео
+                i2s_channel_write(tx_handle, pcm_buf, samples * 2 * sizeof(int16_t), &bw, portMAX_DELAY);
+            } else {
+                // Если файл уже стерео, пишем как обычно
+                i2s_channel_write(tx_handle, pcm_buf, samples * info.channels * sizeof(int16_t), &bw, portMAX_DELAY);
+            }
         }
+
         if (info.frame_bytes == 0) break;
         n_read -= info.frame_bytes; read_ptr += info.frame_bytes;
 
