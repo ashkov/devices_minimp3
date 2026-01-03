@@ -10,7 +10,7 @@
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "sdmmc_cmd.h"
-
+#include "esp_random.h"
 // Используем заголовок dr_mp3 (minimp3)
 #define DR_MP3_IMPLEMENTATION
 #include "dr_mp3.h"
@@ -206,8 +206,77 @@ play_status_t play_file(const char* path) {
     i2s_channel_disable(tx_handle);
     return PLAY_FINISHED;
 }
+// Функция для подсчета всех MP3 файлов на карте
+int count_all_mp3(const char *base_path) {
+    int count = 0;
+    DIR *dir = opendir(base_path);
+    if (!dir) return 0;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", base_path, entry->d_name);
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                count += count_all_mp3(path);
+            } else {
+                char *ext = strrchr(entry->d_name, '.');
+                if (ext && strcasecmp(ext, ".mp3") == 0) count++;
+            }
+        }
+    }
+    closedir(dir);
+    return count;
+}
+
+// Функция для получения пути файла по его порядковому номеру
+bool get_path_by_index(const char *base_path, int target_idx, int *current_idx, char *out_path) {
+    DIR *dir = opendir(base_path);
+    if (!dir) return false;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", base_path, entry->d_name);
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                if (get_path_by_index(path, target_idx, current_idx, out_path)) {
+                    closedir(dir); return true;
+                }
+            } else {
+                char *ext = strrchr(entry->d_name, '.');
+                if (ext && strcasecmp(ext, ".mp3") == 0) {
+                    if (*current_idx == target_idx) {
+                        strcpy(out_path, path);
+                        closedir(dir); return true;
+                    }
+                    (*current_idx)++;
+                }
+            }
+        }
+    }
+    closedir(dir);
+    return false;
+}
 
 void music_player_task(void *pvParameters) {
+    srand(esp_random());
+    // ПЕРВЫЙ ЗАПУСК: Ищем случайный файл
+    ESP_LOGI(TAG, "First run: picking a random file...");
+    int total = count_all_mp3("/sdcard");
+    if (total > 0) {
+        int random_idx = rand() % total;
+        int start_idx = 0;
+        if (get_path_by_index("/sdcard", random_idx, &start_idx, found_path)) {
+            target_found = true;
+        }
+    }
+    strcpy(current_full_path, found_path);
+    play_status_t res = play_file(current_full_path);
     while(1) {
         target_found = false; found_path[0] = ' '; last_seen_path[0] = '\0';
         scan_for_neighbor("/sdcard");
